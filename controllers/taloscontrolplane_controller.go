@@ -21,6 +21,7 @@ import (
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -582,8 +583,21 @@ func (r *TalosControlPlaneReconciler) bootControlPlane(ctx context.Context, clus
 
 // hasEtcdData reports whether the node the context addresses has an etcd data directory.
 func hasEtcdData(ctx context.Context, c *talosclient.Client) (bool, error) {
-	list, err := c.LS(ctx, &machineapi.ListRequest{Root: "/var/lib/etcd/member"})
+	const root = "/var/lib/etcd/member"
+
+	// Talos propagates a missing List root as an os.Lstat error, exposed by gRPC as Unknown.
+	isMissingDirectory := func(err error) bool {
+		s := status.Convert(err)
+
+		return s.Code() == codes.Unknown && s.Message() == "lstat "+root+": no such file or directory"
+	}
+
+	list, err := c.LS(ctx, &machineapi.ListRequest{Root: root})
 	if err != nil {
+		if isMissingDirectory(err) {
+			return false, nil
+		}
+
 		return false, err
 	}
 
@@ -593,7 +607,7 @@ func hasEtcdData(ctx context.Context, c *talosclient.Client) (bool, error) {
 	case err == nil:
 		// any entry at all means the directory exists
 		return true, nil
-	case errors.Is(err, io.EOF) || talosclient.StatusCode(err) == codes.Canceled:
+	case errors.Is(err, io.EOF) || talosclient.StatusCode(err) == codes.Canceled || isMissingDirectory(err):
 		return false, nil
 	default:
 		return false, err
